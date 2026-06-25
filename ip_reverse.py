@@ -21,7 +21,7 @@ GOV_FONT = Font(bold=True, color='FFFFFF')
 EDU_FILL = PatternFill(start_color='92D050', fill_type='solid')
 WRAP_ALIGN = Alignment(wrap_text=True, vertical='top')
 
-BANNER = "\033[93mIP Reverse Domain Lookup | 多源反查 + 合并去重\033[0m"
+BANNER = "\033[93mIP Reverse Domain Lookup | 多源反查 + 合并去重 + 代理支持\033[0m"
 
 _rate_lock = threading.Lock()
 _last_request_time = 0.0
@@ -29,6 +29,10 @@ RATE_LIMIT_SECONDS = 2.0
 
 NO_RESULT_MARKERS = ['no dns a records', 'error', 'no records', 'not found', 'no results']
 IP138_TIMEOUT = 5
+PROXY_TIMEOUT = 20  # 走代理时的请求超时（代理通常比直连慢）
+
+# 全局代理：-p/--proxy 设置；None 表示直连（与原版行为一致）
+_PROXY = None
 
 _source_stats = threading.Lock()
 _source_counts = {}
@@ -92,7 +96,14 @@ def _safe_get(url, headers=None, timeout=15):
     try:
         session = requests.Session()
         session.trust_env = False
-        return session.get(url, headers=headers or {}, timeout=timeout, proxies={'http': None, 'https': None})
+        if _PROXY:
+            # 所有请求走指定代理（http/https/socks），分散出口 IP 防止封禁
+            proxies = {'http': _PROXY, 'https': _PROXY}
+            req_timeout = PROXY_TIMEOUT
+        else:
+            proxies = {'http': None, 'https': None}
+            req_timeout = timeout
+        return session.get(url, headers=headers or {}, timeout=req_timeout, proxies=proxies)
     except Exception:
         return None
 
@@ -267,6 +278,10 @@ Options:
   -f, --format <txt|xlsx>    输出格式 (默认: txt)
   -t, --threads <NUM>        线程数 (默认: 5)
   -r, --rate <SECONDS>       请求间隔秒数 (默认: 2)
+  -p, --proxy <URL>          代理地址，所有请求走该代理分散出口IP防封
+                             支持 http:// socks4:// socks5:// 及带认证
+                             例: http://127.0.0.1:8080
+                                 socks5://user:pass@127.0.0.1:1080
   -h, --help                 显示帮助
 
 Examples:
@@ -275,6 +290,8 @@ Examples:
   {sys.argv[0]} -l ips.txt
   {sys.argv[0]} -l ips.txt -o result.xlsx -f xlsx -t 10
   {sys.argv[0]} -l ips.txt -t 3 -r 3
+  {sys.argv[0]} -l ips.txt -p http://127.0.0.1:8080 -r 1
+  {sys.argv[0]} -l ips.txt -p socks5://127.0.0.1:1080 -r 0
 
 数据来源:
   ip138         site.ip138.com (主力源)
@@ -371,6 +388,7 @@ def export_xlsx(results, targets_order, filename):
 
 
 def main(argv):
+    global _PROXY
     print(f"\n{BANNER}")
     targets = []
     output = ""
@@ -380,7 +398,8 @@ def main(argv):
     _source_counts = {}
     _progress_done = 0
     try:
-        opts, args = getopt.getopt(argv, "hu:l:o:f:t:r:", ["help", "url=", "list=", "output=", "format=", "threads=", "rate="])
+        opts, args = getopt.getopt(argv, "hu:l:o:f:t:r:p:",
+                                   ["help", "url=", "list=", "output=", "format=", "threads=", "rate=", "proxy="])
     except getopt.GetoptError:
         print("参数错误！使用 -h 查看帮助")
         sys.exit(2)
@@ -410,6 +429,11 @@ def main(argv):
             threads = int(arg)
         elif opt in ("-r", "--rate"):
             RATE_LIMIT_SECONDS = float(arg)
+        elif opt in ("-p", "--proxy"):
+            p = arg.strip()
+            if '://' not in p:
+                p = 'http://' + p  # 未带协议时默认 http 代理
+            _PROXY = p
 
     if not targets:
         print("请指定目标(-u/-l)")
@@ -435,6 +459,9 @@ def main(argv):
     est_time = len(targets) * source_count * RATE_LIMIT_SECONDS
     print(f"\n🔍 开始处理 {len(targets)} 个目标 (线程: {threads}, 限速: {RATE_LIMIT_SECONDS}s/请求)")
     print(f"📡 数据源: ip138 + hackertarget")
+    print(f"🔌 代理  : {_PROXY if _PROXY else '直连（未启用代理）'}")
+    if _PROXY and RATE_LIMIT_SECONDS > 0:
+        print(f"💡 提示  : 已启用代理可适当降低限速 (-r 1 或 -r 0) 提速")
     print(f"📄 输出格式: {fmt} → {output}")
     print(f"⏱️  预计耗时: ~{est_time:.0f}s ({est_time/60:.1f}min)")
     print(f"💡 Ctrl+C 可安全中断\n")
